@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "routes": [
+    { "src": "/health", "dest": "/api/health.js" },
+    { "src": "/vless-ws(.*)", "dest": "/api/vless-ws.js" },
+    { "src": "/api/v1/(.*)", "dest": "/api/vless-ws.js" }
+  ],
+  "env": {
+    "MAIN_HOST": "208.123.185.235",
+    "VLESS_PORT": "2007"
+  }
+}
