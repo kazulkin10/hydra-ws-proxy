@@ -1,5 +1,5 @@
 // HYDRA VLESS WebSocket → TCP прокси
-// Универсальный — работает на Node.js (Render, Railway, Koyeb, Amvera, etc.)
+// Универсальный — работает на Node.js (Render, Railway, Koyeb, etc.)
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
@@ -15,17 +15,6 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, node: NODE_NAME, port: VLESS_PORT, ts: Date.now() }));
     return;
   }
-  // API relay
-  if (req.url.startsWith('/api/v1/') || req.url.startsWith('/sync/')) {
-    const opts = { hostname: MAIN_HOST, port: 8443, path: req.url, method: req.method, headers: { 'Content-Type': 'application/json' } };
-    const proxy = http.request(opts, (pRes) => {
-      res.writeHead(pRes.statusCode, pRes.headers);
-      pRes.pipe(res);
-    });
-    proxy.on('error', () => { res.writeHead(502); res.end('upstream error'); });
-    req.pipe(proxy);
-    return;
-  }
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end('<html><body>Service OK</body></html>');
 });
@@ -37,53 +26,67 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
-  // Подключаемся к Xray WS inbound на main
-  const tcpConn = net.createConnection({ host: MAIN_HOST, port: VLESS_PORT }, () => {
-    // Пересобираем WS handshake для Xray
-    const wsKey = req.headers['sec-websocket-key'] || crypto.randomBytes(16).toString('base64');
-    const acceptKey = crypto.createHash('sha1').update(wsKey + '258EAFA5-E914-47DA-95CA-5AB5DC1165B0').digest('base64');
+  // Подключаемся к Xray WS inbound на main через TCP
+  const upstream = net.createConnection({ host: MAIN_HOST, port: VLESS_PORT }, () => {
+    // Формируем WS handshake для Xray
+    const wsKey = crypto.randomBytes(16).toString('base64');
+    const lines = [
+      'GET /vless-ws HTTP/1.1',
+      `Host: ${MAIN_HOST}:${VLESS_PORT}`,
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${wsKey}`,
+      'Sec-WebSocket-Version: 13',
+      '', ''
+    ];
+    upstream.write(lines.join('\r\n'));
 
-    // Отправляем WS upgrade запрос к Xray
-    const upgradeReq = `GET /vless-ws HTTP/1.1\r\nHost: ${MAIN_HOST}:${VLESS_PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${wsKey}\r\nSec-WebSocket-Version: 13\r\n\r\n`;
-    tcpConn.write(upgradeReq);
+    // Ждём ответ от Xray (101 Switching Protocols)
+    let buf = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const idx = buf.indexOf('\r\n\r\n');
+      if (idx === -1) return; // ещё не весь заголовок — ждём
 
-    let handshakeDone = false;
-    let buffer = Buffer.alloc(0);
+      upstream.removeListener('data', onData);
 
-    tcpConn.once('data', (chunk) => {
-      // Ищем конец HTTP заголовков от Xray
-      buffer = Buffer.concat([buffer, chunk]);
-      const headerEnd = buffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) return;
-
-      // Проверяем что Xray принял WS
-      const headerStr = buffer.slice(0, headerEnd).toString();
+      const headerStr = buf.slice(0, idx).toString();
       if (!headerStr.includes('101')) {
+        console.error('Xray rejected WS:', headerStr.split('\r\n')[0]);
         socket.destroy();
-        tcpConn.destroy();
+        upstream.destroy();
         return;
       }
-      handshakeDone = true;
 
-      // Отвечаем клиенту с WS accept
-      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + acceptKey + '\r\n\r\n');
+      // Отвечаем клиенту
+      const acceptKey = crypto.createHash('sha1')
+        .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-5AB5DC1165B0')
+        .digest('base64');
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
+      );
 
-      // Если были данные после заголовков — отправляем клиенту
-      const remaining = buffer.slice(headerEnd + 4);
-      if (remaining.length > 0) {
-        socket.write(remaining);
-      }
+      // Если head содержит данные от клиента — передаём upstream
+      if (head && head.length > 0) upstream.write(head);
 
-      // Двунаправленный pipe: клиент ↔ Xray
-      socket.pipe(tcpConn);
-      tcpConn.pipe(socket);
-    });
+      // Оставшиеся данные после заголовков Xray → клиенту
+      const rest = buf.slice(idx + 4);
+      if (rest.length > 0) socket.write(rest);
+
+      // Двунаправленный pipe
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    };
+    upstream.on('data', onData);
   });
 
-  tcpConn.on('error', () => socket.destroy());
-  socket.on('error', () => tcpConn.destroy());
-  socket.on('close', () => tcpConn.destroy());
-  tcpConn.on('close', () => socket.destroy());
+  upstream.on('error', (e) => { console.error('upstream err:', e.message); socket.destroy(); });
+  socket.on('error', () => upstream.destroy());
+  socket.on('close', () => upstream.destroy());
+  upstream.on('close', () => socket.destroy());
 });
 
 server.listen(PORT, '0.0.0.0', () => {
