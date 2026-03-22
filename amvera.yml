@@ -1,0 +1,10 @@
+meta:
+  environment: node
+  toolchain:
+    name: nodejs
+    version: "20"
+build:
+  dockerfile: Dockerfile
+run:
+  containerPort: 3000
+  healthcheckPath: /health
