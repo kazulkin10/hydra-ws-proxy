@@ -1,8 +1,8 @@
 // HYDRA VLESS WebSocket → TCP прокси
-// Универсальный — работает на Node.js (Render, Railway, Koyeb, etc.)
+// Использует ws для надёжного WS relay
 const http = require('http');
 const net = require('net');
-const crypto = require('crypto');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const MAIN_HOST = process.env.MAIN_HOST || '208.123.185.235';
 const VLESS_PORT = parseInt(process.env.VLESS_PORT || '2001');
@@ -19,74 +19,38 @@ const server = http.createServer((req, res) => {
   res.end('<html><body>Service OK</body></html>');
 });
 
-// WebSocket upgrade — проксируем в Xray WS
-server.on('upgrade', (req, socket, head) => {
-  if (!req.url.startsWith('/vless-ws')) {
-    socket.destroy();
-    return;
-  }
+// WS сервер для приёма клиентских подключений
+const wss = new WebSocketServer({ server, path: '/vless-ws' });
 
-  // Подключаемся к Xray WS inbound на main через TCP
-  const upstream = net.createConnection({ host: MAIN_HOST, port: VLESS_PORT }, () => {
-    // Формируем WS handshake для Xray
-    const wsKey = crypto.randomBytes(16).toString('base64');
-    const lines = [
-      'GET /vless-ws HTTP/1.1',
-      `Host: ${MAIN_HOST}:${VLESS_PORT}`,
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Key: ${wsKey}`,
-      'Sec-WebSocket-Version: 13',
-      '', ''
-    ];
-    upstream.write(lines.join('\r\n'));
+wss.on('connection', (clientWs, req) => {
+  // Открываем WS к Xray
+  const upstreamUrl = `ws://${MAIN_HOST}:${VLESS_PORT}/vless-ws`;
+  const upstream = new WebSocket(upstreamUrl);
 
-    // Ждём ответ от Xray (101 Switching Protocols)
-    let buf = Buffer.alloc(0);
-    const onData = (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      const idx = buf.indexOf('\r\n\r\n');
-      if (idx === -1) return; // ещё не весь заголовок — ждём
-
-      upstream.removeListener('data', onData);
-
-      const headerStr = buf.slice(0, idx).toString();
-      if (!headerStr.includes('101')) {
-        console.error('Xray rejected WS:', headerStr.split('\r\n')[0]);
-        socket.destroy();
-        upstream.destroy();
-        return;
+  upstream.on('open', () => {
+    // Relay: client → upstream
+    clientWs.on('message', (data) => {
+      if (upstream.readyState === WebSocket.OPEN) {
+        upstream.send(data);
       }
+    });
 
-      // Отвечаем клиенту
-      const acceptKey = crypto.createHash('sha1')
-        .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-5AB5DC1165B0')
-        .digest('base64');
-      socket.write(
-        'HTTP/1.1 101 Switching Protocols\r\n' +
-        'Upgrade: websocket\r\n' +
-        'Connection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
-      );
-
-      // Если head содержит данные от клиента — передаём upstream
-      if (head && head.length > 0) upstream.write(head);
-
-      // Оставшиеся данные после заголовков Xray → клиенту
-      const rest = buf.slice(idx + 4);
-      if (rest.length > 0) socket.write(rest);
-
-      // Двунаправленный pipe
-      socket.pipe(upstream);
-      upstream.pipe(socket);
-    };
-    upstream.on('data', onData);
+    // Relay: upstream → client
+    upstream.on('message', (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data);
+      }
+    });
   });
 
-  upstream.on('error', (e) => { console.error('upstream err:', e.message); socket.destroy(); });
-  socket.on('error', () => upstream.destroy());
-  socket.on('close', () => upstream.destroy());
-  upstream.on('close', () => socket.destroy());
+  upstream.on('error', (e) => {
+    console.error('upstream err:', e.message);
+    clientWs.close();
+  });
+  upstream.on('close', () => clientWs.close());
+
+  clientWs.on('error', () => upstream.close());
+  clientWs.on('close', () => upstream.close());
 });
 
 server.listen(PORT, '0.0.0.0', () => {
