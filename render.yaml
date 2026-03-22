@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: hydra-node-render
+    runtime: node
+    plan: free
+    buildCommand: echo ok
+    startCommand: node index.js
+    envVars:
+      - key: MAIN_HOST
+        value: 208.123.185.235
+      - key: VLESS_PORT
+        value: "2007"
+      - key: NODE_NAME
+        value: render
