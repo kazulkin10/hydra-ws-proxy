@@ -1,7 +1,4 @@
-// HYDRA VLESS WebSocket → TCP прокси
-// Использует ws для надёжного WS relay
 const http = require('http');
-const net = require('net');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const MAIN_HOST = process.env.MAIN_HOST || '208.123.185.235';
@@ -19,40 +16,40 @@ const server = http.createServer((req, res) => {
   res.end('<html><body>Service OK</body></html>');
 });
 
-// WS сервер для приёма клиентских подключений
 const wss = new WebSocketServer({ server, path: '/vless-ws' });
 
-wss.on('connection', (clientWs, req) => {
-  // Открываем WS к Xray
-  const upstreamUrl = `ws://${MAIN_HOST}:${VLESS_PORT}/vless-ws`;
-  const upstream = new WebSocket(upstreamUrl);
+wss.on('connection', (clientWs) => {
+  const buffer = [];
+  let upstreamReady = false;
+
+  const upstream = new WebSocket(`ws://${MAIN_HOST}:${VLESS_PORT}/vless-ws`);
+
+  // Buffer client messages immediately — don't wait for upstream.open
+  clientWs.on('message', (data) => {
+    if (upstreamReady && upstream.readyState === WebSocket.OPEN) {
+      upstream.send(data);
+    } else {
+      buffer.push(data);
+    }
+  });
 
   upstream.on('open', () => {
-    // Relay: client → upstream
-    clientWs.on('message', (data) => {
-      if (upstream.readyState === WebSocket.OPEN) {
-        upstream.send(data);
-      }
-    });
-
-    // Relay: upstream → client
+    upstreamReady = true;
+    // Flush buffered messages
+    for (const msg of buffer) { upstream.send(msg); }
+    buffer.length = 0;
+    // Wire upstream → client
     upstream.on('message', (data) => {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(data);
-      }
+      if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
     });
   });
 
-  upstream.on('error', (e) => {
-    console.error('upstream err:', e.message);
-    clientWs.close();
-  });
-  upstream.on('close', () => clientWs.close());
-
-  clientWs.on('error', () => upstream.close());
-  clientWs.on('close', () => upstream.close());
+  upstream.on('error', (e) => { console.error('upstream err:', e.message); try { clientWs.close(); } catch {} });
+  upstream.on('close', () => { try { clientWs.close(); } catch {} });
+  clientWs.on('error', () => { try { upstream.close(); } catch {} });
+  clientWs.on('close', () => { try { upstream.close(); } catch {} });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`HYDRA WS proxy [${NODE_NAME}] → ${MAIN_HOST}:${VLESS_PORT} on :${PORT}`);
+  console.log(`WS relay [${NODE_NAME}] -> ${MAIN_HOST}:${VLESS_PORT} on :${PORT}`);
 });
