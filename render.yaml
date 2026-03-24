@@ -3,12 +3,29 @@ services:
     name: hydra-node-render
     runtime: node
     plan: free
-    buildCommand: echo ok
+    buildCommand: npm install
     startCommand: node index.js
-    envVars:
-      - key: MAIN_HOST
-        value: 208.123.185.235
-      - key: VLESS_PORT
-        value: "2007"
-      - key: NODE_NAME
-        value: render
+  - type: web
+    name: hydra-relay-r2
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+  - type: web
+    name: hydra-relay-r3
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+  - type: web
+    name: hydra-relay-r4
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+  - type: web
+    name: hydra-relay-r5
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
